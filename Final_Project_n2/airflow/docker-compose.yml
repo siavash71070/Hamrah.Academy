@@ -1,0 +1,91 @@
+x-airflow-common:
+  &airflow-common
+  image: apache/airflow:2.9.1
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'false'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth'
+    AIRFLOW__WEBSERVER__SECRET_KEY: 'mysecretkey'
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow_postgres/airflow
+    AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@airflow_postgres/airflow
+    # REMOVE THIS LINE: _PIP_ADDITIONAL_REQUIREMENTS: "faker==19.13.0 psycopg2-binary==2.9.7"
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./requirements.txt:/requirements.txt
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    redis:
+      condition: service_started
+    airflow_postgres:
+      condition: service_healthy
+  networks:
+    - data_network
+
+services:
+  redis:
+    image: redis:latest
+    container_name: airflow_redis
+    restart: unless-stopped
+    networks:
+      - data_network
+
+  airflow_postgres:
+    image: postgres:15
+    container_name: airflow_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - data_network
+
+  airflow_init:
+    <<: *airflow-common
+    container_name: airflow_init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        pip install --no-cache-dir -r /requirements.txt
+        airflow db migrate
+        airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com
+    restart: "no"
+
+  airflow_webserver:
+    <<: *airflow-common
+    container_name: airflow_webserver
+    command: webserver
+    ports:
+      - "8080:8080"
+    restart: always
+
+  airflow_scheduler:
+    <<: *airflow-common
+    container_name: airflow_scheduler
+    command: scheduler
+    restart: always
+
+  airflow_worker:
+    <<: *airflow-common
+    container_name: airflow_worker
+    command: celery worker
+    restart: always
+
+volumes:
+  postgres_data:
+
+networks:
+  data_network:
+    external: true
