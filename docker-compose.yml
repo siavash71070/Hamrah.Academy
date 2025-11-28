@@ -1,0 +1,296 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: lms_postgres
+    command: ["postgres", "-c", "wal_level=logical",
+            "-c", "max_wal_senders=10",
+            "-c", "max_replication_slots=10",
+            "-c", "max_connections=300"]
+    environment:
+      POSTGRES_DB: lms_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 123456
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+    volumes:
+      - ./postgres_data:/var/lib/postgresql/data
+      - ./sql/lms_schema.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    expose:
+      - 5432
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d lms_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  postgres-init:
+    image: postgres:16
+    container_name: lms_postgres_init
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: lms_db
+      PGUSER: postgres
+      PGPASSWORD: 123456
+    volumes:
+      - ./sql/lms_schema.sql:/docker-entrypoint-initdb.d/init.sql
+    command: >
+      bash -c "
+        echo 'Waiting for PostgreSQL to be ready...'
+        until pg_isready -h postgres -U postgres -d lms_db; do
+          sleep 2
+        done
+      
+        echo 'Checking if tables need to be created...'
+        if ! psql -c 'SELECT tablename FROM pg_tables WHERE schemaname = '\''public'\'' AND tablename = '\''payments'\''' | grep -q payments; then
+          echo 'Creating database schema...'
+          psql -f /docker-entrypoint-initdb.d/init.sql
+          echo 'Schema created successfully!'
+        else
+          echo 'Tables already exist - skipping schema creation'
+        fi
+      
+        echo 'Setting up Debezium for PostgreSQL...'
+        psql -c \"
+          -- Create publication for Debezium
+          CREATE PUBLICATION IF NOT EXISTS debezium_pub FOR ALL TABLES;
+          
+          -- Create replication slot
+          SELECT pg_create_logical_replication_slot('debezium_slot', 'pgoutput');
+          
+          -- Create user for Debezium
+          DO \\$\\$ 
+          BEGIN 
+            IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'debezium') THEN
+              CREATE USER debezium WITH REPLICATION LOGIN PASSWORD 'debezium';
+            END IF;
+          END \\$\\$;
+          
+          -- Grant permissions
+          GRANT USAGE ON SCHEMA public TO debezium;
+          GRANT SELECT ON ALL TABLES IN SCHEMA public TO debezium;
+        \"
+        echo 'Debezium setup completed!'
+      "
+    profiles: [ "init" ]
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: lms-pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin123
+    volumes:
+      - "./pgadmin/pgadmin_servers.json:/pgadmin4/servers.json"
+      - "./pgadmin/pgadmin_pass:/pgadmin4/pass"
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+
+  airflow-webserver:
+    user: "0:0"
+    image: apache/airflow:2.9.3-python3.11
+    container_name: airflow_webserver
+    command: 
+    - bash
+    - -c
+    - |
+      python -m pip install --no-cache-dir -r /opt/airflow/requirements.txt
+      airflow webserver
+    ports:
+      - "8080:8080"
+    environment:
+      AIRFLOW_UID: 0
+      AIRFLOW_GIDS: 0
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor  
+      _AIRFLOW_WWW_USER_USERNAME: admin
+      _AIRFLOW_WWW_USER_PASSWORD: admin
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:123456@postgres:5432/lms_db    
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./scripts:/opt/airflow/scripts
+      - ./logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+      - ./requirements.txt:/opt/airflow/requirements.txt
+    depends_on:
+      - postgres
+      - airflow-init
+
+  airflow-scheduler:
+    user: "0:0"
+    image: apache/airflow:2.9.3-python3.11
+    container_name: airflow_scheduler
+    command: 
+    - bash
+    - -c
+    - |
+      python -m pip install --no-cache-dir -r /opt/airflow/requirements.txt
+      airflow scheduler
+    environment:
+      AIRFLOW_UID: 0
+      AIRFLOW_GIDS: 0
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:123456@postgres:5432/lms_db
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./scripts:/opt/airflow/scripts
+      - ./logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+      - ./requirements.txt:/opt/airflow/requirements.txt
+    depends_on:
+      - postgres
+
+  airflow-init:
+    user: "0:0"
+    image: apache/airflow:2.9.3-python3.11
+    container_name: airflow_init
+    environment:
+      AIRFLOW_UID: 0
+      AIRFLOW_GIDS: 0
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:123456@postgres:5432/lms_db
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      _AIRFLOW_WWW_USER_USERNAME: admin
+      _AIRFLOW_WWW_USER_PASSWORD: admin
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        mkdir -p /opt/airflow/dags /opt/airflow/plugins
+        # Initialize the database and create a user
+        python -m pip install --no-cache-dir -r /opt/airflow/requirements.txt 
+        airflow db migrate
+        airflow users create \
+            --username admin \
+            --firstname aaa \
+            --lastname bbb \
+            --role Admin \
+            --email admin@airflow.com \
+            --password admin
+        airflow connections add 'postgres_default' --conn-type 'postgres' --conn-host 'postgres' --conn-login 'postgres' --conn-password '123456' --conn-schema 'lms_db' --conn-port '5432'
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./scripts:/opt/airflow/scripts
+      - ./logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+      - ./requirements.txt:/opt/airflow/requirements.txt
+    depends_on:
+      - postgres
+
+  # ----------------------------------------
+  # NEW SERVICES FOR STEP 4 (CDC With Debezium)
+  # ----------------------------------------
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.3
+    container_name: lms-zookeeper
+    restart: unless-stopped
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.3
+    container_name: lms-kafka
+    restart: unless-stopped
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "9094:9094"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_CLUSTER_ID: lms-cluster
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: lms-clickhouse
+    restart: unless-stopped
+    ports:
+      - "8123:8123"  # HTTP
+      - "9000:9000"  # Native
+    volumes:
+      - ./clickhouse_data:/var/lib/clickhouse
+      - ./sql/clickhouse-init-complete.sql:/docker-entrypoint-initdb.d/init.sql
+    environment:
+      - CLICKHOUSE_DB=lms_analytics
+      - CLICKHOUSE_USER=lms_user
+      - CLICKHOUSE_PASSWORD=lms_password
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+    depends_on:
+      - kafka
+
+  debezium-connect:
+    image: debezium/connect:2.5
+    container_name: lms-debezium-connect
+    restart: unless-stopped
+    depends_on:
+      - zookeeper
+      - kafka
+    ports:
+      - "8083:8083" # REST API for connectors
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: 1
+      CONFIG_STORAGE_TOPIC: kafka-connect-configs
+      OFFSET_STORAGE_TOPIC: kafka-connect-offsets
+      STATUS_STORAGE_TOPIC: kafka-connect-status
+      OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      STATUS_STORAGE_REPLICATION_FACTOR: 1
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_TOPIC_CREATION_ENABLE: "true"
+      ENABLE_AUTO_COMMIT: 'true'
+      AUTO_COMMIT_INTERVAL_MS: 5000
+    volumes:
+      - ./connectors:/kafka/connectors
+
+  superset:
+    build:
+      context: .
+      dockerfile: Dockerfile-superset
+    container_name: lms-superset
+    restart: unless-stopped
+    ports:
+      - "8088:8088"
+    environment:
+      SUPERSET_SECRET_KEY: "your_secret_key_here"
+    volumes:
+      - superset_home:/app/superset_home
+    command:
+      - bash
+      - -c
+      - |
+        superset db upgrade &&
+        superset fab create-admin \
+          --username admin \
+          --firstname Superset \
+          --lastname Admin \
+          --email admin@example.com \
+          --password admin &&
+        superset init &&
+        superset run --host=0.0.0.0 --port=8088
+    depends_on:
+      - clickhouse
+
+volumes:
+  postgres_data:
+  clickhouse_data:
+  superset_home:
