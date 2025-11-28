@@ -1,0 +1,150 @@
+This project implements a complete data collection and analytics pipeline for an LMS (Learning Management System).
+The system integrates multiple technologies to enable:
+
+Real-time data streaming
+
+Analytical database storage
+
+Automated workflows
+
+Dashboarding and reporting
+
+| Component            | Purpose                                          |
+| -------------------- | ------------------------------------------------ |
+| **PostgreSQL**       | Main transactional database                      |
+| **Kafka + Debezium** | Change data capture (CDC) & streaming            |
+| **ClickHouse**       | Analytical storage for dashboards                |
+| **Apache Airflow**   | Task orchestration & incremental data generation |
+| **Superset**         | Dashboards and data exploration                  |
+
+🚀 Quick Start
+
+1. Start All Services
+docker compose up -d
+
+2. (Optional) Initialize PostgreSQL Schema
+f the database already contains tables, Docker may skip creation.
+To enforce schema creation:
+
+docker compose --profile init postgre-init
+
+This profile runs a special container to ensure tables are created properly.
+
+🧪 Data Generation Workflow
+🔹 1. Generate Fake Initial Data
+Using Python, Faker, and psycopg2, the script below inserts synthetic data into PostgreSQL:
+python3 generate_fake_data.py
+
+🔹 2. Generate Incremental Data
+Airflow runs a DAG that simulates a new student registration every 30 seconds:
+python3 generate_incremental_data.py
+
+🔄 Streaming + Syncing to ClickHouse
+Kafka + Debezium
+Debezium streams all PostgreSQL changes into Kafka topics.
+Run the connector:
+
+curl -X POST -H "Content-Type: application/json" \
+     -d @connectors/lms-postgres-connector.json \
+     http://localhost:8083/connectors
+
+Kafka Consumer → ClickHouse
+A custom Python consumer processes new events and inserts them into ClickHouse:
+python3 kafka_concumer_fixed.py
+Note: PostgreSQL changes typically reach ClickHouse within 2–5 seconds.
+
+📊 Dashboards in Superset
+After ClickHouse is populated:
+1.Open Superset UI
+2.Create a ClickHouse database connection
+3.Build datasets
+4.Add charts & dashboards using SQL queries
+
+Charts Created
+.Big Number: Total revenue
+.Big Number: Total students
+.Big Number: Average payment
+.Bar Chart: Top courses
+.Bar Chart: Courses by enrollment
+.Bar Chart: Courses per student
+.Line Chart: Daily revenue trend
+.Line Chart: Monthly revenue
+.Line Chart: Student enrollment trend
+.Pie Chart: Payment methods
+
+📑 Superset SQL Queries
+Total Revenue:
+SELECT SUM(amount) AS total_revenue
+FROM superset_payments;
+
+Total Students:
+SELECT COUNT(*) AS total_students
+FROM students_merge;
+
+Monthly Revenue:
+SELECT
+    toStartOfMonth(payment_datetime) AS month,
+    SUM(amount) AS monthly_revenue
+FROM superset_payments
+GROUP BY month
+ORDER BY month;
+
+Payment Methods:
+SELECT
+    payment_method,
+    SUM(amount) AS total_amount
+FROM superset_payments
+WHERE payment_method != ''
+GROUP BY payment_method
+ORDER BY total_amount DESC;
+
+
+
+🧭 Project Run Order:
+1. docker compose up -d
+2. docker compose --profile init postgre-init
+3. docker compose ps
+
+🧪 Testing Containers & Data:
+PostgreSQL
+Enter container:
+docker exec -it -u postgres lms_postgres bash
+
+List tables:
+docker exec lms_postgres psql -U postgres -d lms_db -c "\dt"
+
+
+Kafka
+Consume messages:
+docker exec lms_kafka kafka-console-consumer \
+  --bootstrap-server localhost:9092 \
+  --topic lms.public.students --from-beginning --max-messages 1
+
+List topics:
+docker exec lms_kafka kafka-topics --list --bootstrap-server localhost:9092
+
+
+Debezium Connector Status
+curl http://localhost:8083/connectors/lms-postgres-connector/status
+
+
+Airflow – test dependencies
+docker exec airflow_webserver python -c "import psycopg2, faker, dotenv; print('All packages installed')"
+
+
+ClickHouse – list tables
+curl -u lms_user:lms-password -X POST "http://localhost:8123" \
+  -d "SHOW TABLES FROM lms_analytics"
+
+
+🌐 UI Access
+| Service             | URL                                            |
+| ------------------- | ---------------------------------------------- |
+| **Kafka Connect**   | [http://localhost:8083](http://localhost:8083) |
+| **ClickHouse HTTP** | [http://localhost:8123](http://localhost:8123) |
+| **Superset**        | [http://localhost:8088](http://localhost:8088) |
+| **Airflow**         | [http://localhost:8080](http://localhost:8080) |
+
+
+<img width="1347" height="635" alt="Screenshot from 2025-11-28 10-47-36" src="https://github.com/user-attachments/assets/f57cd77d-e43f-42ef-9635-dfcce94132b8" />
+<img width="1347" height="635" alt="Screenshot from 2025-11-28 10-47-15" src="https://github.com/user-attachments/assets/fdf1698b-fa1c-4c5d-b5b0-41d545e16c3f" />
