@@ -1,9 +1,0 @@
-# database requirements
-psycopg2-binary==2.9.10
-Faker==19.3.0
-pandas==2.2.2
-
-# airflow dependencies
-apache-airflow==2.9.1
-
-
