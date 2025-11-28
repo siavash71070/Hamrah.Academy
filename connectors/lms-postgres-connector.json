@@ -1,0 +1,30 @@
+{
+  "name": "lms-postgres-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.user": "postgres",
+    "database.password": "123456",
+    "database.dbname": "lms_db",
+    "database.server.name": "lms",
+    "plugin.name": "pgoutput",
+    "publication.name": "lms_pub",
+    "slot.name": "lms_slot",
+    "table.include.list": "public.students,public.enrollments,public.payments,public.courses",
+    "publication.autocreate.mode": "all_tables",
+    "snapshot.mode": "initial",
+
+    // CRITICAL: Fix for numeric handling
+    "decimal.handling.mode": "string",
+    "numeric.mapping": "best_fit",
+
+    // Required: Add topic prefix
+    "topic.prefix": "lms",
+
+    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable": "false",
+    "value.converter.schemas.enable": "false"
+  }
+}
